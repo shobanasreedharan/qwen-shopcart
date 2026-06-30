@@ -1,83 +1,64 @@
-# ==========================================
-# 1. ENVIRONMENT VARIABLES & SECRETS (.env)
-# ==========================================
-# Block all local environment secret files
+# ===== Secrets & credentials (CRITICAL — never commit) =====
+serviceAccountKey.json
+*serviceAccountKey*.json
+*.key.json
 .env
-.env.local
-.env.development.local
-.env.test.local
-.env.production.local
-*.env
-
-# DO NOT ignore the example file so team members know what variables to set
+.env.*
 !.env.example
+*.pem
+*.pfx
+alibaba_credentials*
+.aliyun/
 
-# ==========================================
-# 2. PYTHON (Backend & Virtual Environments)
-# ==========================================
-# Byte-compiled / optimized / DLL files
+# ===== Python =====
 __pycache__/
 *.py[cod]
 *$py.class
-
-# C extensions
 *.so
-
-# Distribution / packaging
 .Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-share/python-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
-
-# Virtual Environments
-.venv/
 venv/
-ENV/
+.venv/
 env/
-pythonenv*/
-
-# Jupyter Notebook checkpoints
-.ipynb_checkpoints
-
-# pytest / coverage
+ENV/
+*.egg-info/
 .pytest_cache/
-.coverage
-htmlcov/
+.mypy_cache/
+.ruff_cache/
+pip-log.txt
 
-# ==========================================
-# 3. REACT / NODE (Frontend)
-# ==========================================
-# Dependencies (Never commit this massive folder)
+# ===== Node / React =====
 node_modules/
-jspm_packages/
-
-# Production build artifacts
+.next/
 build/
 dist/
-out/
-
-# Log files
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
-pnpm-debug.log*
+package-lock.json.bak
 
-# Editor/System specific files (Optional but recommended)
+# ===== Firebase =====
+.firebase/
+firebase-debug.log
+firestore-debug.log
+ui-debug.log
+
+# ===== IDE =====
+.idea/
+.vscode/
+*.iml
+
+# ===== OS noise =====
 .DS_Store
 Thumbs.db
-.vscode/
-.idea/
+desktop.ini
+
+# ===== Stray command-output files (seen in original repo — guard against recurrence) =====
+/npm
+/findstr
+/curl
+/gcloud
+
+# ===== Logs / misc =====
+*.log
+.cache/
+coverage/
