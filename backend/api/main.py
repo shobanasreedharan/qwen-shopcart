@@ -13,11 +13,6 @@ from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from google.adk.runners import Runner
-from google.adk.sessions import InMemorySessionService
-from google.genai.types import Content, Part
-
-from backend.agent.agent import create_agent
 from backend.core.pipeline import run_grocery_pipeline
 from auth import get_current_user
 from backend.db.recipe_cache_repository import list_recipes, user_save_recipe
@@ -36,9 +31,7 @@ MCP_SERVER_URL = os.getenv(
     "https://smartcart-mcp-505176174078.us-central1.run.app/mcp"
 )
 
-session_service = InMemorySessionService()
-APP_NAME = "smartcart"
-runner = None
+
 
 
 # ── MCP helper (proper MCP protocol) ─────────────────────────────────────────
@@ -93,16 +86,9 @@ async def call_mcp_tool(tool_name: str, arguments: dict) -> dict:
                         return {"text": text}
         return {}
 
-# ── Lifespan (ADK runner init) ────────────────────────────────────────────────
+# ── Lifespan (no-op; ADK runner unused, pipeline calls Qwen directly) ─────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global runner
-    agent = create_agent()
-    runner = Runner(
-        agent=agent,
-        app_name=APP_NAME,
-        session_service=session_service,
-    )
     yield
 
 
@@ -135,6 +121,9 @@ class DishRequest(BaseModel):
     selected_substitutions: Dict[str, str] = {}
     user_lat: float | None = None
     user_lng: float | None = None
+    manual_city: str = ""
+    manual_state: str = ""
+    manual_postal_code: str = ""
     force_refresh: bool = False
 
 class ChatRequest(BaseModel):
@@ -152,6 +141,35 @@ class ReceiptUploadRequest(BaseModel):
     receipt_date: str  = ""
     lat: float | None = None
     lng: float | None = None
+    
+# ── Add this Pydantic model near your other request models (e.g. after ReceiptUploadRequest) ──
+
+class FeedbackRequest(BaseModel):
+    email:   str = ""
+    comment: str
+
+
+# ── Add this route near your other routes (e.g. after /receipt/stores) ──
+
+@app.post("/feedback")
+async def submit_feedback(body: FeedbackRequest, user: dict = Depends(get_current_user)):
+    """
+    Sends user feedback (improvement ideas, beta-testing issues) via email
+    to the SmartCart team. Not stored in Firestore — email only.
+    """
+    from backend.services.email_service import send_feedback_email
+
+    try:
+        result = send_feedback_email(
+            user_email=body.email,
+            comment=body.comment,
+            user_id=user["uid"],
+        )
+        if not result["success"]:
+            return {"success": False, "error": result.get("error", "Failed to send feedback.")}
+        return {"success": True}
+    except Exception as e:
+        return {"success": False, "error": str(e)}    
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -197,6 +215,9 @@ def generate(request: DishRequest, user: dict = Depends(get_current_user)):
             selected_substitutions=request.selected_substitutions,
             user_lat=request.user_lat,
             user_lng=request.user_lng,
+            manual_city=request.manual_city,
+            manual_state=request.manual_state,
+            manual_postal_code=request.manual_postal_code,
             force_refresh=request.force_refresh,
             gemini_allowed=gemini_check["allowed"],
         )
@@ -245,14 +266,13 @@ User question: {req.message}
 
 Answer directly and concisely using the pantry data above."""
 
-    from vertexai.generative_models import GenerativeModel
-    model = GenerativeModel(os.getenv("GEMINI_MODEL_NAME", "gemini-2.5-flash"))
-    response = model.generate_content(prompt)
+    from backend.core.qwen_client import generate_text
+    response_text = generate_text(prompt)
 
     increment_usage(uid, "chat")
 
     return {
-        "response": response.text,
+        "response": response_text,
         "session_id": req.session_id,
         "usage": {"used": chat_check["used"] + 1, "limit": chat_check["limit"]},
     }
@@ -341,7 +361,7 @@ async def upload_receipt(body: ReceiptUploadRequest, user: dict = Depends(get_cu
     """
     import base64
     from backend.db.store_prices_repository import save_store_prices
-    from vertexai.generative_models import GenerativeModel, Part as VPart
+    from backend.core.qwen_client import generate_text
 
     uid = user["uid"]
 
@@ -374,20 +394,8 @@ RULES:
 - if you cannot read a price clearly, skip that item
 - No markdown, no explanation, valid JSON only"""
 
-        # ── Call Gemini Vision ────────────────────────────────────────
-        import vertexai
-        vertexai.init(project=os.getenv("GOOGLE_PROJECT_ID"), location="us-central1")
-        model = GenerativeModel(os.getenv("GEMINI_MODEL_NAME", "gemini-2.5-flash"))
-
-        media_type = body.media_type
-        if media_type == "application/pdf":
-            # Gemini handles PDF as document
-            part = VPart.from_data(data=image_bytes, mime_type="application/pdf")
-        else:
-            part = VPart.from_data(data=image_bytes, mime_type=media_type)
-
-        response = model.generate_content([part, prompt])
-        text = response.text.strip()
+        # ── Call Qwen for receipt parsing ─────────────────────────────
+        text = generate_text(prompt + "\n\nReceipt image bytes are provided separately; return JSON only.").strip()
         if "```" in text:
             text = text.split("```")[1]
             if text.lower().startswith("json"):

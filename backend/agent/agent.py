@@ -2,17 +2,12 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import os
-import vertexai
 from google.adk.agents import LlmAgent
 
-vertexai.init(
-    project=os.getenv("GOOGLE_CLOUD_PROJECT"),
-    location=os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
-)
 
 def create_agent(tools=None):
     return LlmAgent(
-        model=os.getenv("GEMINI_MODEL_NAME", "gemini-2.5-flash"),
+        model=os.getenv("QWEN_MODEL", "qwen-plus"),
         name="smartcart_agent",
         instruction="""You are SmartCart, an AI meal planning and grocery assistant.
         Your responsibilities:

@@ -1,18 +1,14 @@
 from typing import Dict, Any
-import os, json
-import vertexai
-from vertexai.generative_models import GenerativeModel
+import json
 from dotenv import load_dotenv
 
+from backend.core.qwen_client import generate_text
 from backend.db.recipe_cache_repository import (
     get_cached_recipe,
     save_recipe_cache
 )
 
 load_dotenv()
-
-PROJECT_ID = os.getenv("GOOGLE_PROJECT_ID")
-MODEL_NAME = os.getenv("GEMINI_MODEL_NAME", "gemini-1.5-flash")
 
 
 def _cache_key(meal: str, dietary: str) -> str:
@@ -168,8 +164,23 @@ def run_unified_ai(
     manual_items = manual_items or []
     is_single_meal = len(weekly_meals) == 1
 
-    vertexai.init(project=PROJECT_ID, location="us-central1")
-    model = GenerativeModel(MODEL_NAME)
+    # ─── SHOPPING LIST / MANUAL ITEMS ONLY (no meals at all) ───────────────────
+    # This mode has zero entries in weekly_meals — previously this fell through
+    # to the multi-meal branch below, which assumes at least one meal exists
+    # (e.g. `list(weekly_meals.values())[0]` for a nutrition fallback), causing
+    # "list index out of range". There's no meal to plan around here, so we
+    # short-circuit with the manual items as the shopping list directly.
+    if not weekly_meals:
+        print("[unified_ai] No meals provided — manual items only (Shopping List mode)")
+        shopping_list = list(dict.fromkeys(
+            item.lower().strip() for item in manual_items
+            if isinstance(item, str) and item.strip()
+        ))
+        result = _fallback(shopping_list)
+        result["_source"] = "manual_items"
+        result["_gemini_called"] = False
+        result["instructions"] = []
+        return result
 
     # ─── SINGLE MEAL ─────────────────────────────────────────────────────────
     if is_single_meal:
@@ -203,11 +214,10 @@ def run_unified_ai(
             result["_gemini_called"] = False
             return result
 
-        # Call Gemini
+        # Call Qwen
         prompt = _build_single_meal_prompt(weekly_meals, dietary, manual_items)
         try:
-            response = model.generate_content(prompt)
-            text = response.text.strip()
+            text = generate_text(prompt).strip()
             if "```" in text:
                 text = text.split("```")[1]
                 if text.lower().startswith("json"):
@@ -267,8 +277,7 @@ def run_unified_ai(
     if uncached_meals and gemini_allowed:
         prompt = _build_multi_meal_prompt(uncached_meals, dietary)
         try:
-            response = model.generate_content(prompt)
-            text = response.text.strip()
+            text = generate_text(prompt).strip()
             if "```" in text:
                 text = text.split("```")[1]
                 if text.lower().startswith("json"):
@@ -323,7 +332,7 @@ def run_unified_ai(
         item for ingredients in all_meals.values() for item in ingredients
     ))
 
-    if not nutrition_report:
+    if not nutrition_report and weekly_meals:
         first_meal   = list(weekly_meals.values())[0]
         first_key    = _cache_key(first_meal, dietary)
         first_cached = get_cached_recipe(user_id, first_key)

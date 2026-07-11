@@ -1,29 +1,11 @@
 from typing import Dict, Any, List
 import json
-import os
 from dotenv import load_dotenv
 
-import vertexai
-from vertexai.generative_models import GenerativeModel
-
+from backend.core.qwen_client import generate_text
 from backend.core.registry import MCP_REGISTRY
 
 load_dotenv()
-
-PROJECT_ID = os.getenv("GOOGLE_PROJECT_ID")
-GEMINI_MODEL_NAME = os.getenv("GEMINI_MODEL_NAME", "gemini-1.5-flash")
-
-
-# =====================================================
-# INIT VERTEX AI (ADC AUTH)
-# =====================================================
-
-vertexai.init(
-    project=PROJECT_ID,
-    location="us-central1"
-)
-
-model = GenerativeModel(GEMINI_MODEL_NAME)
 
 
 # =====================================================
@@ -32,7 +14,7 @@ model = GenerativeModel(GEMINI_MODEL_NAME)
 
 def generate_meal_plan(dish_name: str, dietary_instruction: str) -> Dict[str, Any]:
     """
-    Single Gemini call that returns:
+    Single Qwen call that returns:
     - shopping list
     - nutrition report
     """
@@ -52,7 +34,7 @@ def generate_meal_plan(dish_name: str, dietary_instruction: str) -> Dict[str, An
         return cached
 
     # -------------------------
-    # 2. GEMINI PROMPT (SINGLE SOURCE OF TRUTH)
+    # 2. QWEN PROMPT (SINGLE SOURCE OF TRUTH)
     # -------------------------
     prompt = f"""
                     You are an AI grocery planning assistant.
@@ -103,8 +85,7 @@ def generate_meal_plan(dish_name: str, dietary_instruction: str) -> Dict[str, An
 """
 
     try:
-        response = model.generate_content(prompt)
-        text = response.text.strip()
+        text = generate_text(prompt).strip()
 
         # clean markdown if any
         text = text.replace("```json", "").replace("```", "").strip()
@@ -149,14 +130,14 @@ def generate_meal_plan(dish_name: str, dietary_instruction: str) -> Dict[str, An
                 "ingredients": cleaned_list,
                 "nutrition_report": nutrition_report,
                 "substitutions": substitutions,
-                "source": "vertex_ai"
+                "source": "qwen"
             }
         )
 
         return result
 
     except Exception as e:
-        print(f"[recipe_agent] Gemini failed: {e}")
+        print(f"[recipe_agent] qwen failed: {e}")
 
     # -------------------------
     # 4. FALLBACK

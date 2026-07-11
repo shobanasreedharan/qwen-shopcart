@@ -1,9 +1,9 @@
 from typing import Dict, List, Any
 import json
 import os
-import vertexai
-from vertexai.generative_models import GenerativeModel
 from dotenv import load_dotenv
+
+from backend.core.qwen_client import generate_text
 
 from backend.db.recipe_cache_repository import (
     get_cached_recipe,
@@ -13,18 +13,6 @@ from backend.db.recipe_cache_repository import (
 from backend.ai.fallback_engine import fallback_ingredients
 
 load_dotenv()
-
-PROJECT_ID = os.getenv("GOOGLE_PROJECT_ID")
-GEMINI_MODEL_NAME = os.getenv("GEMINI_MODEL_NAME", "gemini-1.5-flash")
-
-# =====================================================
-# INIT ONCE
-# =====================================================
-if PROJECT_ID:
-    vertexai.init(project=PROJECT_ID, location="us-central1")
-
-model = GenerativeModel(GEMINI_MODEL_NAME)
-
 
 # =====================================================
 # PROMPT
@@ -99,9 +87,9 @@ def build_weekly_ingredients_batched(
 
         try:
             prompt = _build_prompt(meal, dietary_instruction)
-            response = model.generate_content(prompt)
+            response_text = generate_text(prompt)
 
-            parsed = _safe_json(response.text)
+            parsed = _safe_json(response_text)
 
             if not isinstance(parsed, dict):
                 raise ValueError("Invalid AI response")

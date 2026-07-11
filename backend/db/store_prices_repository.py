@@ -1,136 +1,150 @@
-from datetime import datetime, timezone, timedelta
+import re
+from datetime import datetime, timezone
+
 from backend.db.firestore_client import db
 
-PRICE_EXPIRY_DAYS = 30
+COLLECTION = "store_prices"
+
+# Minimal country -> currency map. Extend as you add more markets.
+COUNTRY_CURRENCY_MAP = {
+    "US": "USD",
+    "IN": "INR",
+    "GB": "GBP",
+    "CA": "CAD",
+    "AU": "AUD",
+    "SG": "SGD",
+    "AE": "AED",
+}
 
 
-def _store_id(store_name: str, city: str, state: str) -> str:
-    """Deterministic doc ID — same store from different users merges."""
-    raw = f"{store_name}_{city}_{state}".lower()
-    return raw.replace(" ", "_").replace("/", "_").replace("\\", "_").strip("_")
+def get_currency_for_country(country: str) -> str:
+    """Resolve an ISO country code to a currency code. Defaults to USD only
+    if the country is unknown/blank — every real caller should be passing
+    a resolved country from location.py, not relying on this default."""
+    if not country:
+        return "USD"
+    return COUNTRY_CURRENCY_MAP.get(country.upper().strip(), "USD")
+
+
+def _make_store_id(store_name: str, city: str, state: str) -> str:
+    """
+    Deterministic store ID so re-uploads for the same store merge into one
+    document instead of creating duplicates. e.g. "Trader Joe's" + "Austin" +
+    "TX" -> "traders_joes_austin_tx"
+    """
+    raw = f"{store_name}_{city}_{state}".lower().strip()
+    raw = re.sub(r"[^a-z0-9]+", "_", raw)
+    return raw.strip("_")
+
+
+def get_real_price(item: str, store_name: str, city: str, state: str):
+    """
+    Looks up a real, receipt-derived price for a specific item at a specific
+    store. Returns {"price": float, "currency": str} if found, or None if no
+    real data exists yet for this item/store combination.
+
+    Used by store_finder.py as the first choice before falling back to
+    estimated/mock prices. Callers must read the "currency" field rather
+    than assuming USD.
+    """
+    store_id = _make_store_id(store_name, city, state)
+    doc = db.collection(COLLECTION).document(store_id).get()
+
+    if not doc.exists:
+        return None
+
+    doc_data = doc.to_dict()
+    items = doc_data.get("items", {})
+    # Fall back through: per-item currency -> store-level currency -> USD
+    store_currency = doc_data.get("currency") or get_currency_for_country(doc_data.get("country"))
+    item_key = item.lower().strip()
+
+    def _result(data):
+        price = data.get("price")
+        if price is None:
+            return None
+        return {
+            "price": float(price),
+            "currency": data.get("currency", store_currency),
+        }
+
+    # Exact match first
+    if item_key in items:
+        result = _result(items[item_key])
+        if result:
+            return result
+
+    # Fuzzy: item contains a known item name, or vice versa
+    for known_item, data in items.items():
+        if known_item in item_key or item_key in known_item:
+            result = _result(data)
+            if result:
+                return result
+
+    return None
 
 
 def save_store_prices(
     uploaded_by: str,
-    store_name:  str,
-    city:        str,
-    state:       str,
-    country:     str,
-    address:     str,
-    items:       dict,          # {"black beans": {"price": 1.29, "unit": "can"}}
-    receipt_date: str = None,   # "2026-06-27"
+    store_name: str,
+    city: str,
+    state: str,
+    country: str = "US",
+    address: str = "",
+    items: dict = None,
+    receipt_date: str = "",
     lat: float = None,
     lng: float = None,
 ) -> dict:
     """
-    Upserts store prices into Firestore.
-    Merges new items with existing — newer price wins per item.
+    Saves receipt-derived item prices to a shared store_prices Firestore
+    collection, keyed by a deterministic store_id. Multiple receipts for
+    the same store merge into one document, so item prices stay current
+    as new receipts come in.
+
+    Returns {"success": True, "item_count": int, "store_id": str}
     """
-    store_id  = _store_id(store_name, city, state)
-    now       = datetime.now(timezone.utc)
-    expires   = now + timedelta(days=PRICE_EXPIRY_DAYS)
-    ref       = db.collection("store_prices").document(store_id)
-    existing  = ref.get()
+    items = items or {}
+    if not items:
+        return {"success": False, "error": "No items to save.", "item_count": 0, "store_id": None}
 
-    # Merge existing items with new ones (new price wins)
-    merged_items = {}
-    if existing.exists:
-        merged_items = existing.to_dict().get("items", {})
+    store_id = _make_store_id(store_name, city, state)
+    doc_ref = db.collection(COLLECTION).document(store_id)
 
+    now = datetime.now(timezone.utc).isoformat()
+    currency = get_currency_for_country(country)
+
+    existing = doc_ref.get()
+    existing_data = existing.to_dict() if existing.exists else {}
+    existing_items = existing_data.get("items", {})
+
+    # Merge new items over existing ones — newer receipt data wins per item
+    merged_items = {**existing_items}
     for item_name, item_data in items.items():
-        key = item_name.lower().strip()
-        merged_items[key] = {
-            "price":      item_data.get("price"),
-            "unit":       item_data.get("unit", ""),
-            "updated_at": now,
+        merged_items[item_name] = {
+            **item_data,
+            "currency": item_data.get("currency", currency),
+            "last_updated": now,
+            "uploaded_by": uploaded_by,
+            "receipt_date": receipt_date,
         }
 
-    doc = {
-        "store_id":    store_id,
-        "store_name":  store_name.strip(),
-        "address":     address.strip() if address else "",
-        "city":        city.strip(),
-        "state":       state.strip(),
-        "country":     country.strip(),
-        "items":       merged_items,
-        "uploaded_by": uploaded_by,
-        "receipt_date": receipt_date or now.strftime("%Y-%m-%d"),
-        "expires_at":  expires,
-        "updated_at":  now,
+    doc_ref.set({
+        "store_name": store_name,
+        "city": city,
+        "state": state,
+        "country": country,
+        "currency": currency,
+        "address": address,
+        "lat": lat,
+        "lng": lng,
+        "items": merged_items,
+        "last_updated": now,
+    }, merge=True)
+
+    return {
+        "success": True,
+        "item_count": len(items),          # items added/updated in this upload
+        "total_items": len(merged_items),  # total items now known for this store
+        "store_id": store_id,
     }
-    if lat is not None: doc["lat"] = lat
-    if lng is not None: doc["lng"] = lng
-
-    ref.set(doc, merge=True)
-    print(f"[store_prices] saved {len(merged_items)} items for {store_name} ({city}, {state})")
-    return {"store_id": store_id, "item_count": len(merged_items)}
-
-
-def get_store_prices(store_name: str, city: str, state: str) -> dict:
-    """Returns price dict for a specific store. {} if not found or expired."""
-    store_id = _store_id(store_name, city, state)
-    try:
-        doc = db.collection("store_prices").document(store_id).get()
-        if not doc.exists:
-            return {}
-        data = doc.to_dict()
-        # Check expiry
-        expires_at = data.get("expires_at")
-        if expires_at and expires_at < datetime.now(timezone.utc):
-            print(f"[store_prices] prices expired for {store_name}")
-            return {}
-        return data.get("items", {})
-    except Exception as e:
-        print(f"[store_prices] error fetching prices: {e}")
-        return {}
-
-
-def get_stores_in_city(city: str, state: str) -> list:
-    """Returns all stores with prices in a given city."""
-    try:
-        now  = datetime.now(timezone.utc)
-        docs = (
-            db.collection("store_prices")
-            .where("city",  "==", city.strip())
-            .where("state", "==", state.strip())
-            .stream()
-        )
-        results = []
-        for doc in docs:
-            data = doc.to_dict()
-            expires_at = data.get("expires_at")
-            if expires_at and expires_at < now:
-                continue  # skip expired
-            results.append({
-                "store_id":   data.get("store_id"),
-                "store_name": data.get("store_name"),
-                "address":    data.get("address"),
-                "city":       data.get("city"),
-                "state":      data.get("state"),
-                "item_count": len(data.get("items", {})),
-                "updated_at": data.get("updated_at"),
-            })
-        return results
-    except Exception as e:
-        print(f"[store_prices] error listing stores in {city}: {e}")
-        return []
-
-
-def get_real_price(item: str, store_name: str, city: str, state: str) -> float | None:
-    """
-    Returns real price for an item at a store, or None if not found.
-    Used by store_finder.py to override mock prices.
-    """
-    prices = get_store_prices(store_name, city, state)
-    item_lower = item.lower().strip()
-
-    # Exact match first
-    if item_lower in prices:
-        return prices[item_lower].get("price")
-
-    # Partial match — "black beans" matches "canned black beans"
-    for key, val in prices.items():
-        if item_lower in key or key in item_lower:
-            return val.get("price")
-
-    return None

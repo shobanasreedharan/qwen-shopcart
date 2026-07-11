@@ -39,6 +39,7 @@ def normalize_store_brand(name):
     name = name.lower()
 
     mapping = {
+        # US chains
         "walmart":  "Walmart",
         "target":   "Target",
         "kroger":   "Kroger",
@@ -52,12 +53,23 @@ def normalize_store_brand(name):
         "sprouts":  "Sprouts",
         "dierbergs": "Dierbergs",
         "schnucks": "Schnucks",
+        # India chains
+        "reliance fresh": "Reliance Fresh",
+        "reliance smart": "Reliance Smart",
+        "big bazaar": "Big Bazaar",
+        "dmart":    "DMart",
+        "more supermarket": "More",
+        "spencer": "Spencer's",
+        "star bazaar": "Star Bazaar",
+        "nature's basket": "Nature's Basket",
     }
 
     for k, v in mapping.items():
         if k in name:
             return v
 
+    # Any store not in the mapping (any country/chain) falls through here —
+    # returns its real name as-is, title-cased. Not an error case.
     return name.title()
 
 
@@ -80,23 +92,46 @@ def find_nearby_grocery_stores(lat, lng, radius=15000):
 
     url = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
 
-    # Two passes: supermarkets + big-box stores (Walmart, Target, Costco)
+    # "supermarket" is a valid Google Places type globally.
+    # "grocery_or_supermarket" is NOT a real Places API type — it silently
+    # failed on every call. Replaced with a keyword-based search instead,
+    # which works well internationally (matches local names/languages too,
+    # e.g. "Reliance Fresh", "Big Bazaar", "kirana store" in India).
     all_results = []
-    for search_type in ["supermarket", "grocery_or_supermarket"]:
-        params = {
-            "location": f"{lat},{lng}",
-            "radius": radius,
-            "type": search_type,
-            "key": GOOGLE_MAPS_API_KEY
-        }
-        try:
-            res = requests.get(url, params=params, timeout=10).json()
-            print(f"\n[DEBUG] Google Places results for type={search_type}:")
-            for i, place in enumerate(res.get("results", [])):
-                print(i, "-", place.get("name"), "|", place.get("types"))
-            all_results.extend(res.get("results", []))
-        except Exception as e:
-            print(f"[stores] Google API request failed for type={search_type}:", e)
+
+    # Pass 1: official "supermarket" type (most reliable everywhere)
+    params = {
+        "location": f"{lat},{lng}",
+        "radius": radius,
+        "type": "supermarket",
+        "key": GOOGLE_MAPS_API_KEY
+    }
+    try:
+        res = requests.get(url, params=params, timeout=10).json()
+        print(f"\n[DEBUG] Google Places results for type=supermarket:")
+        for i, place in enumerate(res.get("results", [])):
+            print(i, "-", place.get("name"), "|", place.get("types"))
+        all_results.extend(res.get("results", []))
+    except Exception as e:
+        print(f"[stores] Google API request failed for type=supermarket:", e)
+
+    # Pass 2: broader keyword search — catches big-box/general stores
+    # (Walmart, Target, Costco, or local equivalents) that Google may not
+    # tag strictly as "supermarket", and works across languages/regions.
+    params = {
+        "location": f"{lat},{lng}",
+        "radius": radius,
+        "keyword": "grocery store",
+        "key": GOOGLE_MAPS_API_KEY
+    }
+    try:
+        res = requests.get(url, params=params, timeout=10).json()
+        print(f"\n[DEBUG] Google Places results for keyword='grocery store':")
+        for i, place in enumerate(res.get("results", [])):
+            print(i, "-", place.get("name"), "|", place.get("types"))
+        all_results.extend(res.get("results", []))
+    except Exception as e:
+        print(f"[stores] Google API request failed for keyword search:", e)
 
     if not all_results:
         return []
@@ -156,12 +191,34 @@ def find_nearby_grocery_stores(lat, lng, radius=15000):
 # INVENTORY + ITEMIZED PRICES (🔥 FIX)
 # =====================================================
 
-def mock_check_inventory(store_name, shopping_list, city="", state=""):
+def mock_check_inventory(store_name, shopping_list, city="", state="", country=""):
     """
     Checks real prices from Firestore first (uploaded receipts).
     Falls back to mock prices if no real data exists.
+
+    Every returned item includes a "currency" field, derived from `country`.
+    Mock prices are also scaled per currency so the numbers are the right
+    order of magnitude (a mock USD price of $2.50 should not become a mock
+    INR price of ₹2.50 — it should become something like ₹190).
     """
-    from backend.db.store_prices_repository import get_real_price
+    from backend.db.store_prices_repository import get_real_price, get_currency_for_country
+
+    currency = get_currency_for_country(country)
+
+    # Rough scale factor to keep MOCK prices in a plausible range per
+    # currency. These are not live FX rates — just enough so a fake grocery
+    # price looks locally sane (e.g. INR items are commonly in the tens/
+    # hundreds, not single digits).
+    MOCK_SCALE_FACTOR = {
+        "USD": 1.0,
+        "INR": 80.0,
+        "GBP": 0.8,
+        "CAD": 1.35,
+        "AUD": 1.5,
+        "SGD": 1.35,
+        "AED": 3.67,
+    }
+    scale = MOCK_SCALE_FACTOR.get(currency, 1.0)
 
     inventory = {}
     lower = store_name.lower()
@@ -178,7 +235,8 @@ def mock_check_inventory(store_name, shopping_list, city="", state=""):
         if real_price is not None:
             inventory[item] = {
                 "available": True,
-                "price": real_price,
+                "price": real_price["price"],
+                "currency": real_price["currency"],
                 "note": "real price from receipt",
                 "source": "receipt",
             }
@@ -200,10 +258,11 @@ def mock_check_inventory(store_name, shopping_list, city="", state=""):
         elif "target" in lower:
             multiplier = 1.05
 
-        price = round(base_price * multiplier, 2) if available else None
+        price = round(base_price * multiplier * scale, 2) if available else None
         inventory[item] = {
             "available": available,
             "price": price,
+            "currency": currency,
             "note": None if available else "Not available at this store",
             "source": "mock",
         }
@@ -301,6 +360,7 @@ def recommend_best_store(user_location, shopping_list):
 
     city = user_location.get("city", "")
     state = user_location.get("region", "")
+    country = user_location.get("country", "")
 
     for store in stores:
         try:
@@ -318,7 +378,7 @@ def recommend_best_store(user_location, shopping_list):
             # Inventory check (safe)
             # -----------------------------
             try:
-                inventory = mock_check_inventory(store_name, shopping_list, city, state)
+                inventory = mock_check_inventory(store_name, shopping_list, city, state, country)
                 if not isinstance(inventory, dict):
                     inventory = {}
             except Exception as e:
@@ -347,9 +407,13 @@ def recommend_best_store(user_location, shopping_list):
                 if data.get("available") and data.get("price") is not None:
                     items.append({
                         "item": item,
-                        "price": data["price"]
+                        "price": data["price"],
+                        "currency": data.get("currency", "USD")
                     })
-                    price_breakdown[item] = data["price"]
+                    price_breakdown[item] = {
+                        "price": data["price"],
+                        "currency": data.get("currency", "USD")
+                    }
 
             results.append({
                 "store": store,
