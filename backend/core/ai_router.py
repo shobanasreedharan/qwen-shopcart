@@ -1,16 +1,16 @@
-from backend.engines.gemini_engine import generate_with_gemini
-from backend.engines.fallback_engine import generate_fallback
+from backend.core.qwen_client import generate_text
+from backend.ai.fallback_engine import fallback_ingredients
 
 
 def safe_ai_generate(prompt: str):
     try:
-        result = generate_with_gemini(prompt)
+        result = generate_text(prompt)
 
         if result is None or result == "":
-            raise ValueError("Empty Gemini response")
+            raise ValueError("Empty Qwen response")
 
         return result
 
     except Exception as e:
-        print("[AI Router] Gemini failed → fallback used:", e)
-        return generate_fallback(prompt)
+        print("[AI Router] Qwen failed → fallback used:", e)
+        return "Fallback response: " + str(fallback_ingredients({"fallback": prompt}))

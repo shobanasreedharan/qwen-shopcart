@@ -111,6 +111,9 @@ def run_grocery_pipeline(
     selected_substitutions: dict  = None,
     user_lat: float = None,
     user_lng: float = None,
+    manual_city: str = None,
+    manual_state: str = None,
+    manual_postal_code: str = None,
     force_refresh:          bool  = False,
     gemini_allowed:         bool  = True,
 ):
@@ -210,7 +213,10 @@ def run_grocery_pipeline(
     # =====================================================
     loc = get_user_location(
         user_lat=user_lat,
-        user_lng=user_lng
+        user_lng=user_lng,
+        manual_city=manual_city,
+        manual_state=manual_state,
+        manual_postal_code=manual_postal_code
     ) or {}
 
     user_location = {

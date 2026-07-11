@@ -1,13 +1,11 @@
 import json
-import vertexai
-from vertexai.generative_models import GenerativeModel
-
 import os
 from dotenv import load_dotenv
+
+from backend.core.qwen_client import generate_text
+
 load_dotenv()
 
-PROJECT_ID = os.getenv("GOOGLE_PROJECT_ID")
-GEMINI_MODEL_NAME = os.getenv("GEMINI_MODEL_NAME")
 
 class GeminiPlanner:
 
@@ -33,17 +31,9 @@ Return JSON:
 }}
 """
 
-        vertexai.init(
-            project=PROJECT_ID,
-            location="us-central1"
-        )
-
-        model = GenerativeModel(GEMINI_MODEL_NAME)
-
-        response = model.generate_content(prompt)
-
+        response = generate_text(prompt)
 
         try:
             return json.loads(response)
-        except:
+        except Exception:
             return {"type": "FINALIZE"}
