@@ -171,10 +171,14 @@ function buildMatrix(stores) {
   const allItems = new Set();
   stores.forEach(s => (s.items||[]).forEach(i => allItems.add(i.item)));
   const items = [...allItems].sort();
-  const matrix = {}, totals = {};
+  const matrix = {}, totals = {}, currencies = {};
   stores.forEach(s => {
     const n = s.store_name; totals[n]=0; matrix[n]={};
-    (s.items||[]).forEach(i => { matrix[n][i.item]=i.price; totals[n]+=i.price; });
+    (s.items||[]).forEach(i => {
+      matrix[n][i.item]=i.price;
+      totals[n]+=i.price;
+      if (!currencies[n]) currencies[n] = i.currency || "USD";
+    });
   });
   const wCounts={}, wTotals={};
   items.forEach(item => {
@@ -182,7 +186,12 @@ function buildMatrix(stores) {
     stores.forEach(s => { const p=matrix[s.store_name]?.[item]; if(p!==undefined&&p<minP){minP=p;minS=s.store_name;} });
     if(minS){ wCounts[minS]=(wCounts[minS]||0)+1; wTotals[minS]=(wTotals[minS]||0)+minP; }
   });
-  return { items, matrix, totals, wCounts, wTotals, overallCheapest:Object.values(wTotals).reduce((a,b)=>a+b,0) };
+  return { items, matrix, totals, currencies, wCounts, wTotals, overallCheapest:Object.values(wTotals).reduce((a,b)=>a+b,0) };
+}
+
+const CURRENCY_SYMBOLS = { USD:"$", INR:"₹", GBP:"£", CAD:"CA$", AUD:"A$", SGD:"S$", AED:"AED " };
+function formatPrice(amount, currency="USD") {
+  return `${CURRENCY_SYMBOLS[currency] || ""}${amount.toFixed(2)}`;
 }
 
 // ── Chat Panel ───────────────────────────────────────────────────────────────
@@ -416,6 +425,73 @@ function PantryPage({ getToken }) {
     </div>
   );
 }
+
+// ── Feedback Page ────────────────────────────────────────────────────────────
+function FeedbackPage({ getToken }) {
+  const [email,   setEmail]   = useState("");
+  const [comment, setComment] = useState("");
+  const [sending, setSending] = useState(false);
+  const [msg,     setMsg]     = useState(null);
+
+  const submitFeedback = async () => {
+    if (!comment.trim()) {
+      setMsg({ type:"error", text:"⚠ Please enter your feedback before submitting." });
+      return;
+    }
+    setSending(true); setMsg(null);
+    try {
+      const token = await getToken();
+      const res = await fetch(`${BASE_URL}/feedback`, {
+        method:"POST",
+        headers:{ "Content-Type":"application/json", ...(token?{Authorization:`Bearer ${token}`}:{}) },
+        body: JSON.stringify({ email, comment }),
+      });
+      const json = await res.json();
+      if (!res.ok || !json.success) throw new Error(json.error || "Failed to send feedback");
+      setMsg({ type:"success", text:"✓ Thank you! Your feedback has been sent." });
+      setComment("");
+    } catch (e) {
+      setMsg({ type:"error", text:`⚠ ${e.message}` });
+    } finally { setSending(false); }
+  };
+
+  return (
+    <div style={{ maxWidth:700, margin:"0 auto", padding:"2rem 1.5rem" }}>
+      <SectionHead label="Feedback" sub="Share ideas, report issues, or tell us what's working" />
+
+      <Card style={{ marginBottom:"1.5rem" }}>
+        <Label>Your Email (so we can follow up)</Label>
+        <input
+          type="email"
+          value={email}
+          onChange={e=>setEmail(e.target.value)}
+          placeholder="you@example.com"
+          style={{ width:"100%", background:T.surfaceAlt, border:`1px solid ${T.border}`, borderRadius:4, padding:"10px 12px", fontSize:14, color:T.ink, fontFamily:"'Lato',sans-serif", outline:"none", marginBottom:16, boxSizing:"border-box" }}
+        />
+
+        <Label>Your Feedback</Label>
+        <textarea
+          value={comment}
+          onChange={e=>setComment(e.target.value)}
+          placeholder="What would you improve? Did something not work as expected during testing? Let us know…"
+          rows={6}
+          style={{ width:"100%", background:T.surfaceAlt, border:`1px solid ${T.border}`, borderRadius:4, padding:"10px 12px", fontSize:14, color:T.ink, fontFamily:"'Lato',sans-serif", outline:"none", resize:"vertical", boxSizing:"border-box" }}
+        />
+      </Card>
+
+      <button onClick={submitFeedback} disabled={sending} style={{ width:"100%", padding:"14px", background:sending?T.borderDark:T.ink, color:"#FFF", border:"none", borderRadius:4, fontSize:14, fontWeight:700, letterSpacing:"0.04em", textTransform:"uppercase", cursor:sending?"not-allowed":"pointer", fontFamily:"'Lato',sans-serif", transition:"background 0.15s" }}>
+        {sending ? "Sending…" : "📩 Send Feedback"}
+      </button>
+
+      {msg && (
+        <div style={{ marginTop:12, padding:"10px 14px", borderRadius:6, fontSize:13, fontWeight:500, background:msg.type==="success"?T.greenLight:T.redLight, color:msg.type==="success"?T.green:T.red, border:`1px solid ${msg.type==="success"?T.green+"33":T.red+"33"}` }}>
+          {msg.text}
+        </div>
+      )}
+    </div>
+  );
+}
+
 
 // ── Recipe Page ──────────────────────────────────────────────────────────────
 const MAX_INGREDIENTS = 20;
@@ -843,7 +919,7 @@ function ReceiptPage({ getToken }) {
                 }}>
                   <span style={{ textTransform: "capitalize" }}>{item}</span>
                   <span style={{ fontFamily: "'DM Mono',monospace", color: T.green, fontWeight: 700 }}>
-                    ${typeof data === "object" ? data.price?.toFixed(2) : Number(data).toFixed(2)}
+                    {formatPrice(typeof data === "object" ? (data.price ?? 0) : Number(data), typeof data === "object" ? (data.currency || "USD") : "USD")}
                     {typeof data === "object" && data.unit ? ` / ${data.unit}` : ""}
                   </span>
                 </div>
@@ -898,15 +974,22 @@ export default function SmartCartAI() {
   const [userLatLng,   setUserLatLng]   = useState(null);
   const resultsRef     = useRef(null);
   const lastPayloadRef = useRef(null);
+  const [showLocationModal, setShowLocationModal] = useState(false);
+  const [manualCity, setManualCity] = useState("");
+  const [manualState, setManualState] = useState("");
+  const [manualPostalCode, setManualPostalCode] = useState("");
+  const [manualLocationSet, setManualLocationSet] = useState(false);
 
   useEffect(() => {
-    if (navigator.geolocation) {
-      navigator.geolocation.getCurrentPosition(
-        pos => setUserLatLng({ lat:pos.coords.latitude, lng:pos.coords.longitude }),
-        ()=>{}
-      );
-    }
-  }, []);
+  if (navigator.geolocation) {
+    navigator.geolocation.getCurrentPosition(
+      pos => setUserLatLng({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
+      () => setShowLocationModal(true)   // GPS denied/unavailable — ask manually instead
+    );
+  } else {
+    setShowLocationModal(true);          // browser has no geolocation support at all
+  }
+}, []);
 
   // Load pantry on sign-in
   useEffect(() => {
@@ -991,6 +1074,7 @@ export default function SmartCartAI() {
         weekly_meals: weekly, manual_items: manualItems, budget:100,
         pantry_items: pantryItems, dietary_instruction: dietary, mode: modeStr,
         ...(userLatLng?{user_lat:userLatLng.lat,user_lng:userLatLng.lng}:{}),
+        ...(manualLocationSet?{manual_city:manualCity,manual_state:manualState,manual_postal_code:manualPostalCode}:{}),
       };
       lastPayloadRef.current = payload;
       const token = await getToken();
@@ -1010,6 +1094,14 @@ export default function SmartCartAI() {
     } finally { setLoading(false); }
   };
 
+  const submitManualLocation = () => {
+    const hasCityState = manualCity.trim() && manualState.trim();
+    const hasPostalCode = manualPostalCode.trim();
+    if (!hasCityState && !hasPostalCode) return;
+    setManualLocationSet(true);
+    setShowLocationModal(false);
+  };
+
   const stores   = data?.recommended_stores ?? [];
   const route    = data?.optimized_route    ?? [];
   const list     = data?.shopping_list      ?? [];
@@ -1025,6 +1117,7 @@ export default function SmartCartAI() {
   const pmOriginalCost   = pm&&pmExpensiveStore ? pm.totals[pmExpensiveStore].toFixed(2) : (budgetOpt.original_cost??0);
   const pmOptimizedCost  = pm ? pm.overallCheapest.toFixed(2) : (budgetOpt.optimized_cost??0);
   const pmMoneySaved     = Math.max(0,parseFloat(pmOriginalCost)-parseFloat(pmOptimizedCost)).toFixed(2);
+  const pmCurrency       = pm ? (Object.values(pm.currencies)[0]||"USD") : (budgetOpt.currency||"USD");
 
   if (authLoading) return (
     <><style>{css}</style>
@@ -1055,6 +1148,7 @@ export default function SmartCartAI() {
               { id:"pantry",  icon:"🥦", label:"Pantry"  },
               { id:"recipes", icon:"📖", label:"Recipes" },
               { id:"receipt", icon:"📄", label:"Upload Receipt" },
+              { id:"feedback", icon:"💬", label:"Feedback" },
             ].map(item => (
               <button key={item.id} onClick={()=>{ setPage(item.id); setNavOpen(false); }}
                 style={{ width:"100%", display:"flex", alignItems:"center", gap:12, padding:"14px 1.5rem", background:page===item.id?T.greenLight:"transparent", color:page===item.id?T.green:T.ink, border:"none", borderLeft:`3px solid ${page===item.id?T.green:"transparent"}`, fontSize:14, fontWeight:page===item.id?700:400, cursor:"pointer", fontFamily:"'Lato',sans-serif", textAlign:"left", transition:"all 0.15s" }}>
@@ -1104,6 +1198,7 @@ export default function SmartCartAI() {
       {page === "pantry"  && <PantryPage  getToken={getToken} />}
       {page === "recipes" && <RecipePage  getToken={getToken} />}
       {page === "receipt" && <ReceiptPage getToken={getToken} />}
+      {page === "feedback" && <FeedbackPage getToken={getToken} />}
 
       {/* Home page */}
       {page === "home" && (
@@ -1182,14 +1277,15 @@ export default function SmartCartAI() {
                             <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(200px,1fr))", gap:12, marginBottom:"1.25rem" }}>
                               {sortedStores.map((store,i)=>{
                                 const name=store.store_name, total=pm.totals[name]||0, isCheapest=i===0;
+                                const currency=pm.currencies[name]||"USD";
                                 const itemsWon=pm.wCounts[name]||0, rank=i===0?"🥇 Cheapest Basket":i===1?"🥈 Runner Up":"🥉 Option 3";
                                 const savings=total-cheapestTotal;
                                 return (
                                   <Card key={name} style={{ borderColor:isCheapest?T.green:T.border }}>
                                     <span style={{ display:"inline-block", marginBottom:8, fontSize:11, fontWeight:700, letterSpacing:"0.06em", textTransform:"uppercase", padding:"2px 8px", borderRadius:3, background:isCheapest?T.greenLight:T.surfaceAlt, color:isCheapest?T.green:T.inkSec }}>{rank}</span>
                                     <div style={{ fontFamily:"'Playfair Display',serif", fontSize:16, marginBottom:4 }}>{name}</div>
-                                    <div style={{ fontFamily:"'DM Mono',monospace", fontSize:22, fontWeight:500, color:isCheapest?T.green:T.ink, marginBottom:2 }}>${total.toFixed(2)}</div>
-                                    {!isCheapest&&savings>0&&<div style={{ fontSize:12, color:T.red, marginBottom:4 }}>+${savings.toFixed(2)} vs cheapest</div>}
+                                    <div style={{ fontFamily:"'DM Mono',monospace", fontSize:22, fontWeight:500, color:isCheapest?T.green:T.ink, marginBottom:2 }}>{formatPrice(total,currency)}</div>
+                                    {!isCheapest&&savings>0&&<div style={{ fontSize:12, color:T.red, marginBottom:4 }}>+{formatPrice(savings,currency)} vs cheapest</div>}
                                     <span style={{ fontSize:12, color:T.inkSec }}>{itemsWon>0?`${itemsWon} cheapest items`:"No cheapest items"}</span>
                                   </Card>
                                 );
@@ -1200,13 +1296,14 @@ export default function SmartCartAI() {
                         {(()=>{
                           const minStoreTotal=Math.min(...stores.map(s=>pm.totals[s.store_name]||Infinity));
                           const savings=minStoreTotal-pm.overallCheapest;
+                          const currency=Object.values(pm.currencies)[0]||"USD";
                           return (
                             <div style={{ background:T.greenLight, border:`1px solid ${T.green}33`, borderRadius:8, padding:"1rem 1.25rem", marginBottom:"1.25rem", display:"flex", alignItems:"center", gap:12 }}>
                               <span style={{ fontSize:22 }}>🏆</span>
                               <div>
                                 <div style={{ fontSize:11, fontWeight:700, color:T.green, letterSpacing:"0.06em", textTransform:"uppercase" }}>Cheapest Possible Basket (Multi-Store)</div>
-                                <div style={{ fontFamily:"'DM Mono',monospace", fontSize:24, fontWeight:500, color:T.green }}>${pm.overallCheapest.toFixed(2)}</div>
-                                <div style={{ fontSize:12, color:T.green }}>{savings>0.01?`Saves $${savings.toFixed(2)} vs single store`:"Best value across stores"}</div>
+                                <div style={{ fontFamily:"'DM Mono',monospace", fontSize:24, fontWeight:500, color:T.green }}>{formatPrice(pm.overallCheapest,currency)}</div>
+                                <div style={{ fontSize:12, color:T.green }}>{savings>0.01?`Saves ${formatPrice(savings,currency)} vs single store`:"Best value across stores"}</div>
                               </div>
                             </div>
                           );
@@ -1228,13 +1325,13 @@ export default function SmartCartAI() {
                                   return (
                                     <tr key={item} style={{ background:ri%2===0?T.surfaceAlt:T.surface }}>
                                       <td style={{ padding:"8px 12px", textTransform:"capitalize", fontWeight:500 }}>{item}</td>
-                                      {stores.map(s=>{ const p=pm.matrix[s.store_name]?.[item], isMin=p===minP; return <td key={s.store_name} style={{ padding:"8px 12px", textAlign:"right", fontFamily:"'DM Mono',monospace", background:isMin?T.greenLight:p===undefined?"#fff5f5":"transparent", color:isMin?T.green:p===undefined?T.red:T.ink, fontWeight:isMin?700:400 }}>{p!==undefined?`$${p.toFixed(2)}`:<span title="Not available">N/A</span>}</td>; })}
+                                      {stores.map(s=>{ const p=pm.matrix[s.store_name]?.[item], isMin=p===minP, curr=pm.currencies[s.store_name]||"USD"; return <td key={s.store_name} style={{ padding:"8px 12px", textAlign:"right", fontFamily:"'DM Mono',monospace", background:isMin?T.greenLight:p===undefined?"#fff5f5":"transparent", color:isMin?T.green:p===undefined?T.red:T.ink, fontWeight:isMin?700:400 }}>{p!==undefined?formatPrice(p,curr):<span title="Not available">N/A</span>}</td>; })}
                                     </tr>
                                   );
                                 })}
                                 <tr style={{ borderTop:`2px solid ${T.border}` }}>
                                   <td style={{ padding:"10px 12px", fontWeight:700, fontFamily:"'Playfair Display',serif" }}>🛒 Total Basket</td>
-                                  {(()=>{ const minTotal=Math.min(...stores.map(st=>pm.totals[st.store_name]||Infinity)); return stores.map(s=>{ const total=pm.totals[s.store_name]||0, isMin=Math.abs(total-minTotal)<0.001; return <td key={s.store_name} style={{ padding:"10px 12px", textAlign:"right", fontFamily:"'DM Mono',monospace", fontWeight:700, background:isMin?T.greenLight:"transparent", color:isMin?T.green:T.ink }}>${total.toFixed(2)}{isMin&&<span style={{ fontSize:10, marginLeft:4 }}>✓ CHEAPEST</span>}</td>; }); })()}
+                                  {(()=>{ const minTotal=Math.min(...stores.map(st=>pm.totals[st.store_name]||Infinity)); return stores.map(s=>{ const total=pm.totals[s.store_name]||0, isMin=Math.abs(total-minTotal)<0.001, curr=pm.currencies[s.store_name]||"USD"; return <td key={s.store_name} style={{ padding:"10px 12px", textAlign:"right", fontFamily:"'DM Mono',monospace", fontWeight:700, background:isMin?T.greenLight:"transparent", color:isMin?T.green:T.ink }}>{formatPrice(total,curr)}{isMin&&<span style={{ fontSize:10, marginLeft:4 }}>✓ CHEAPEST</span>}</td>; }); })()}
                                 </tr>
                               </tbody>
                             </table>
@@ -1372,9 +1469,9 @@ export default function SmartCartAI() {
                     )}
                     <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:12, marginBottom:"1.25rem" }}>
                       {[
-                        {label:"Without Optimization",sublabel:pmExpensiveStore?`Single store: ${pmExpensiveStore}`:"Most expensive store",value:`$${pmOriginalCost}`,color:T.red},
-                        {label:"With Optimization",sublabel:"Multi-store cheapest basket",value:`$${pmOptimizedCost}`,color:T.green},
-                        {label:"You Save",sublabel:"vs worst single store",value:`$${pmMoneySaved}`,color:T.blue},
+                        {label:"Without Optimization",sublabel:pmExpensiveStore?`Single store: ${pmExpensiveStore}`:"Most expensive store",value:formatPrice(parseFloat(pmOriginalCost),pmCurrency),color:T.red},
+                        {label:"With Optimization",sublabel:"Multi-store cheapest basket",value:formatPrice(parseFloat(pmOptimizedCost),pmCurrency),color:T.green},
+                        {label:"You Save",sublabel:"vs worst single store",value:formatPrice(parseFloat(pmMoneySaved),pmCurrency),color:T.blue},
                       ].map((m,i)=>(
                         <div key={i} style={{ padding:"1.25rem", borderRadius:6, textAlign:"center", background:T.surfaceAlt, border:`1px solid ${T.border}` }}>
                           <div style={{ fontFamily:"'DM Mono',monospace", fontSize:26, fontWeight:500, color:m.color }}>{m.value}</div>
@@ -1413,6 +1510,71 @@ export default function SmartCartAI() {
       )}
 
       {page==="home" && chatOpen && <ChatPanel onClose={()=>setChatOpen(false)} user={user} getToken={getToken}/>}
+
+      {showLocationModal && (
+        <div style={{
+          position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)",
+          display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000
+        }}>
+          <div style={{
+            background: T.surface, borderRadius: 8, padding: "2rem",
+            maxWidth: 400, width: "90%", boxShadow: "0 8px 32px rgba(0,0,0,0.2)"
+          }}>
+            <h3 style={{ margin: "0 0 8px", fontSize: 18, fontFamily: "'Lato',sans-serif" }}>
+              📍 Where are you shopping from?
+            </h3>
+            <p style={{ margin: "0 0 20px", fontSize: 13, color: T.subtext }}>
+              We couldn't detect your location automatically. Enter your city, state,
+              and ZIP/postal code to find nearby stores and prices more accurately.
+            </p>
+
+              <Label>City</Label>
+              <input
+                type="text"
+                value={manualCity}
+                onChange={e => setManualCity(e.target.value)}
+                placeholder="e.g. Austin or Hyderabad"
+                style={{ width: "100%", background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 4, padding: "10px 12px", fontSize: 14, marginBottom: 12, boxSizing: "border-box", fontFamily: "'Lato',sans-serif" }}
+              />
+    
+              <Label>ZIP / Postal / PIN Code (recommended for accuracy)</Label>
+              <input
+                type="text"
+                value={manualPostalCode}
+                onChange={e => setManualPostalCode(e.target.value)}
+                placeholder="e.g. 78701 or 500001"
+                style={{ width: "100%", background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 4, padding: "10px 12px", fontSize: 14, marginBottom: 12, boxSizing: "border-box", fontFamily: "'Lato',sans-serif" }}
+              />
+              <p style={{ margin: "-8px 0 12px", fontSize: 12, color: T.subtext }}>
+                Adding this helps us find stores much closer to you than city alone.
+              </p>
+    
+              <Label>State / Province / Region</Label>
+              <input
+                type="text"
+                value={manualState}
+                onChange={e => setManualState(e.target.value)}
+                placeholder="e.g. Texas or Telangana"
+                style={{ width: "100%", background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 4, padding: "10px 12px", fontSize: 14, marginBottom: 20, boxSizing: "border-box", fontFamily: "'Lato',sans-serif" }}
+              />
+
+            <button
+              onClick={submitManualLocation}
+              disabled={!(manualCity.trim() && manualState.trim()) && !manualPostalCode.trim()}
+              style={{
+                width: "100%", padding: "12px", background: T.ink, color: "#FFF",
+                border: "none", borderRadius: 4, fontSize: 14, fontWeight: 700,
+                textTransform: "uppercase", letterSpacing: "0.04em",
+                cursor: (!(manualCity.trim() && manualState.trim()) && !manualPostalCode.trim()) ? "not-allowed" : "pointer",
+                opacity: (!(manualCity.trim() && manualState.trim()) && !manualPostalCode.trim()) ? 0.5 : 1,
+                fontFamily: "'Lato',sans-serif"
+              }}
+            >
+              Continue
+            </button>
+          </div>
+        </div>
+      )}
     </>
   );
 }
