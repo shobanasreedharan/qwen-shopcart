@@ -195,8 +195,8 @@ def run_unified_ai(
                 substitutions = cached.get("substitutions", {})
                 nutrition     = cached.get("nutrition_report", {})
                 instructions  = cached.get("instructions", [])
-                if ingredients and substitutions and nutrition:
-                    print(f"[unified_ai] Full cache hit: '{key}' — skipping Gemini")
+                if ingredients and substitutions and nutrition and instructions:
+                    print(f"[unified_ai] Full cache hit: '{key}' — skipping Qwen")
                     result = _format_response({
                         "shopping_list":    ingredients,
                         "substitutions":    substitutions,
@@ -228,6 +228,25 @@ def run_unified_ai(
 
             shopping_list = [item.lower() for item in result["shopping_list"]]
             instructions  = parsed.get("instructions", [])
+            
+            # Retry once if Qwen omitted instructions
+            if not instructions:
+                print(f"[unified_ai] Empty instructions for '{meal}' — retrying once")
+                try:
+                    text_retry = generate_text(prompt).strip()
+                    if "```" in text_retry:
+                        text_retry = text_retry.split("```")[1]
+                        if text_retry.lower().startswith("json"):
+                            text_retry = text_retry[4:]
+                        text_retry = text_retry.strip()
+                    parsed_retry = json.loads(text_retry)
+                    if parsed_retry.get("instructions"):
+                        parsed = parsed_retry
+                        result = _format_response(parsed, source="gemini")
+                        shopping_list = [item.lower() for item in result["shopping_list"]]
+                        instructions = parsed.get("instructions", [])
+                except Exception as retry_err:
+                    print(f"[unified_ai] Retry failed for '{meal}': {retry_err}")
 
             if shopping_list:
                 save_recipe_cache(
